@@ -1,0 +1,65 @@
+// Prisma schema — Somnus AI
+// MVP v0.2 с шифрованием на стороне клиента (zero-knowledge).
+//
+// Принцип: сервер хранит только зашифрованные данные + минимальные метаданные
+// для статистики. Ключ шифрования есть только у пользователя (master_key),
+// который сам зашифрован паролем пользователя (PBKDF2 + AES-GCM).
+//
+// === ДЕПЛОЙ ===
+// Для локальной разработки: provider = "sqlite"
+// Для Vercel/Supabase:     provider = "postgresql" + DATABASE_URL от Supabase
+// Чтобы переключить — измените provider ниже и запустите: bun run db:push
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  // Для продакшена на Vercel поменяйте на "postgresql"
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  password  String // bcrypt hash
+
+  // === Шифрование ===
+  // master_key генерируется на клиенте при регистрации (256 бит, случайный).
+  // Шифруется паролем пользователя через PBKDF2 + AES-GCM.
+  // Хранится на сервере в зашифрованном виде — сервер не может расшифровать.
+  encryptedMasterKey String   // base64
+  masterKeyIv        String   // base64, 12 байт
+  masterKeySalt      String   // base64, 16 байт — соль для PBKDF2
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  entries   DreamEntry[]
+}
+
+model DreamEntry {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // === Зашифрованные поля (не видны серверу) ===
+  encryptedContent     String   // base64: AES-GCM(content)
+  encryptedDayEvents   String?  // base64: AES-GCM(dayEvents) или null
+  encryptedAnalysis    String?  // base64: AES-GCM(JSON {summary, emotions, symbols, realityLinks})
+  analysisIv           String?  // base64: IV для analysis (12 байт)
+  contentIv            String   // base64: IV для content (12 байт)
+  dayEventsIv          String?  // base64: IV для dayEvents (12 байт)
+
+  // === Открытые метаданные (для статистики) ===
+  entryType    String   @default("dream") // "dream" | "anxiety"
+  inputMethod  String   @default("text")  // "text" | "voice"
+  moodScore    Int?     // 0-100 — для графика настроения
+  topEmotion   String?  // для топа эмоций
+
+  createdAt DateTime @default(now())
+  editedAt  DateTime?  // когда последний раз редактировалось (null = не редактировалось)
+
+  @@index([userId, createdAt])
+}
