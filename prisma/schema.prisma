@@ -15,9 +15,9 @@ generator client {
 }
 
 datasource db {
-  // Для продакшена на Vercel поменяйте на "postgresql"
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 model User {
