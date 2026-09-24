@@ -1,34 +1,15 @@
-// Z.ai AI client — server-side only.
-// Использует z-ai-web-dev-sdk: один API и для LLM (GLM-4.5), и для ASR.
-//
-// Конфигурация:
-// - В dev: читает из .z-ai-config файла (как раньше)
-// - В prod (Vercel): использует env var ZAI_API_KEY
-//
-// SDK читает ключ из файла .z-ai-config, но мы можем передать конфиг напрямую
-// через конструктор new ZAI(config), что позволяет использовать env vars.
+// OpenRouter AI client — server-side only.
+// Использует OpenRouter API (https://openrouter.ai/api/v1) для LLM.
+// Поддерживает несколько моделей: DeepSeek, Llama, Qwen.
 
-import ZAI from 'z-ai-web-dev-sdk';
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1';
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'deepseek/deepseek-chat';
+const OPENROUTER_SITE_URL = process.env.NEXTAUTH_URL || 'https://somnus-ai2.vercel.app';
+const OPENROUTER_SITE_NAME = process.env.OPENROUTER_SITE_NAME || 'Somnus AI';
 
-// Singleton-инстанс ZAI
-let zaiInstance: InstanceType<typeof ZAI> | null = null;
-
-async function getZAI() {
-  if (!zaiInstance) {
-    // В production (Vercel) — используем env var
-    const envApiKey = process.env.ZAI_API_KEY;
-    if (envApiKey) {
-      // Передаём конфиг напрямую в конструктор, минуя чтение файла
-      zaiInstance = new ZAI({
-        apiKey: envApiKey,
-        baseUrl: process.env.ZAI_BASE_URL || 'https://api.z.ai/api/paas/v4',
-      });
-    } else {
-      // В dev — используем .z-ai-config файл (через ZAI.create())
-      zaiInstance = await ZAI.create();
-    }
-  }
-  return zaiInstance;
+if (!OPENROUTER_API_KEY) {
+  console.warn('⚠️ OPENROUTER_API_KEY is not set in environment variables');
 }
 
 // =====================================================
@@ -67,30 +48,69 @@ const DREAM_ANALYSIS_SYSTEM_PROMPT = `Ты — Somnus AI, опытный юнг�
 - emotions: 2-5 доминирующих эмоций, intensity 0..1
 - symbols: 1-3 архетипа по Юнгу (Тень, Анима, Самость, Герой, Мудрый старец, Ребёнок и т.д.)
 - realityLinks: связь с дневными событиями (если есть); иначе пустой массив
-- moodScore: 0 (тяжёлая тревога) .. 100 (спокойствие, принятие)`;
+- moodScore: 0 (тяжёлая тревога) .. 100 (спокойствие, принятие)
+
+ВАЖНО: ответ должен быть ТОЛЬКО валидным JSON, без markdown, без \`\`\`json блоков.`;
 
 // =====================================================
-// Транскрипция аудио через Z.ai ASR
+// Транскрипция аудио через OpenRouter (мультимодальная модель)
 // =====================================================
-export async function transcribeAudio(audioBase64: string, _mimeType = 'audio/webm'): Promise<string> {
+export async function transcribeAudio(audioBase64: string, mimeType = 'audio/webm'): Promise<string> {
+  if (!OPENROUTER_API_KEY) {
+    throw new Error('OPENROUTER_API_KEY не настроен на сервере');
+  }
+
   try {
-    const zai = await getZAI();
-    const response = await zai.audio.asr.create({
-      file_base64: audioBase64,
+    const response = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        'HTTP-Referer': OPENROUTER_SITE_URL,
+        'X-Title': OPENROUTER_SITE_NAME,
+      },
+      body: JSON.stringify({
+        model: 'google/gemini-flash-1.5',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: 'Транскрибируй это аудио дословно на русском языке. Верни только текст без комментариев.',
+              },
+              {
+                type: 'image_url',
+                image_url: {
+                  url: `data:${mimeType};base64,${audioBase64}`,
+                },
+              },
+            ],
+          },
+        ],
+      }),
     });
-    const text = (response as any).text?.trim();
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('OpenRouter ASR HTTP error:', response.status, errText);
+      throw new Error(`ASR HTTP ${response.status}: ${errText.substring(0, 200)}`);
+    }
+
+    const data = await response.json() as any;
+    const text = (data.choices?.[0]?.message?.content || '').trim();
     if (!text) {
       throw new Error('ASR вернул пустой ответ');
     }
     return text;
   } catch (err: any) {
-    console.error('Z.ai ASR error:', err?.message || err);
+    console.error('OpenRouter ASR error:', err?.message || err);
     throw new Error(`Не удалось транскрибировать аудио: ${err?.message || 'unknown error'}`);
   }
 }
 
 // =====================================================
-// Анализ сна через Z.ai LLM (GLM-4.5)
+// Анализ сна через OpenRouter LLM (DeepSeek по умолчанию)
 // =====================================================
 export interface DreamAnalysis {
   emotions: { name: string; intensity: number }[];
@@ -105,40 +125,68 @@ export async function analyzeDream(
   dayEvents?: string,
   entryType: 'dream' | 'anxiety' = 'dream'
 ): Promise<DreamAnalysis> {
+  if (!OPENROUTER_API_KEY) {
+    throw new Error('OPENROUTER_API_KEY не настроен на сервере');
+  }
+
   const userPrompt = entryType === 'dream'
     ? `Проанализируй сон:\n\n${dreamText}${dayEvents ? `\n\nСобытия дня: ${dayEvents}` : ''}`
     : `Проанализируй тревожное состояние:\n\n${dreamText}${dayEvents ? `\n\nКонтекст дня: ${dayEvents}` : ''}`;
 
   try {
-    const zai = await getZAI();
-    const completion = await zai.chat.completions.create({
-      messages: [
-        { role: 'assistant', content: DREAM_ANALYSIS_SYSTEM_PROMPT },
-        { role: 'user', content: userPrompt },
-      ],
-      thinking: { type: 'disabled' },
+    const response = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        'HTTP-Referer': OPENROUTER_SITE_URL,
+        'X-Title': OPENROUTER_SITE_NAME,
+      },
+      body: JSON.stringify({
+        model: OPENROUTER_MODEL,
+        messages: [
+          { role: 'system', content: DREAM_ANALYSIS_SYSTEM_PROMPT },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 0.7,
+        max_tokens: 2000,
+      }),
     });
 
-    const raw = (completion.choices?.[0]?.message?.content || '').trim();
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('OpenRouter LLM HTTP error:', response.status, errText);
+      throw new Error(`LLM HTTP ${response.status}: ${errText.substring(0, 200)}`);
+    }
+
+    const data = await response.json() as any;
+    const raw = (data.choices?.[0]?.message?.content || '').trim();
+
     if (!raw) {
+      console.error('OpenRouter LLM empty response:', JSON.stringify(data).substring(0, 500));
       throw new Error('AI вернул пустой ответ');
     }
 
-    // Извлекаем JSON (на случай если модель обернула в markdown)
+    // Извлекаем JSON (модели иногда оборачивают в markdown)
+    let jsonStr = raw;
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
+    if (jsonMatch) {
+      jsonStr = jsonMatch[0];
+    } else {
+      console.error('OpenRouter LLM no JSON in response:', raw.substring(0, 500));
       throw new Error('AI не вернул валидный JSON');
     }
 
-    const parsed = JSON.parse(jsonMatch[0]) as DreamAnalysis;
+    const parsed = JSON.parse(jsonStr) as DreamAnalysis;
 
     if (!parsed.summary || typeof parsed.moodScore !== 'number') {
+      console.error('OpenRouter LLM incomplete response:', JSON.stringify(parsed).substring(0, 500));
       throw new Error('Неполный ответ AI');
     }
 
     return parsed;
   } catch (err: any) {
-    console.error('Z.ai analysis error:', err?.message || err);
+    console.error('OpenRouter analysis error:', err?.message || err);
     throw new Error(`Не удалось проанализировать запись: ${err?.message || 'unknown error'}`);
   }
 }
